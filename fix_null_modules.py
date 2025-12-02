@@ -1,22 +1,36 @@
+"""
+Utilities for normalizing module names and fixing module assignments in
+custom JSON files and fixtures of a Frappe application. This script
+builds a module map from modules.txt, applies optional user overrides,
+updates custom JSON metadata, and ensures fixtures have correct module
+values based on discovered mappings.
+"""
+
 import re
 import json
 from pathlib import Path
+
 import frappe
+from frappe import scrub
 
-
-# ---------------------------------------------------------
-# NORMALIZE MODULE NAME
-# ---------------------------------------------------------
-
-def normalize_module_name(module_name: str) -> str:
-    return re.sub(r"[\s-]+", "_", module_name.strip().lower())
-
-
-# ---------------------------------------------------------
-# BUILD MODULE MAP FROM modules.txt
-# ---------------------------------------------------------
 
 def build_module_map(app: str) -> dict[str, str]:
+    """
+    Build a mapping of module names from modules.txt to normalized names.
+
+    Reads modules.txt inside the given app, extracts non-empty lines, and
+    applies normalization to build a mapping of original → normalized
+    module names.
+
+    Args:
+        app: The Frappe app name.
+
+    Returns:
+        A dictionary mapping original module names to normalized names.
+
+    Raises:
+        FileNotFoundError: If modules.txt is missing.
+    """
     modules_path = Path(frappe.get_app_path(app)) / "modules.txt"
 
     if not modules_path.exists():
@@ -28,14 +42,25 @@ def build_module_map(app: str) -> dict[str, str]:
         if line.strip()
     ]
 
-    return {name: normalize_module_name(name) for name in module_names}
+    return {name: scrub(name) for name in module_names}
 
-
-# ---------------------------------------------------------
-# MERGE AUTO MAP + OVERRIDE MAP
-# ---------------------------------------------------------
 
 def merge_maps(map_build: dict, map_user: dict) -> dict:
+    """
+    Merge the auto-generated module map with the user-defined override map.
+
+    Any user-provided values override the automatically generated ones.
+    If multiple auto-map entries point to the same normalized value but
+    the user overrides only one key, the unused conflicting keys are
+    removed.
+
+    Args:
+        map_build: Automatically generated module map.
+        map_user: User override map.
+
+    Returns:
+        A merged and conflict-resolved module map.
+    """
     final = map_build.copy()
     user_values = set(map_user.values())
 
@@ -51,17 +76,25 @@ def merge_maps(map_build: dict, map_user: dict) -> dict:
     return final
 
 
-# ---------------------------------------------------------
-# FIX CUSTOM JSON
-# ---------------------------------------------------------
-
 def replace_module_in_json_in_customs(data, module_name, mapping_custom_to_module):
+    """
+    Recursively update custom JSON data, setting missing module fields.
+
+    If a JSON object contains `"module": null`, this function replaces it
+    with the provided module name and stores the mapping of docname →
+    module for use during fixture updates.
+
+    Args:
+        data: JSON data loaded into Python objects (dict/list).
+        module_name: The module name to assign when missing.
+        mapping_custom_to_module: Dict to store docname → module mapping.
+
+    Returns:
+        The updated JSON structure.
+    """
     if isinstance(data, dict):
-
         for key, value in data.items():
-
             if key == "module" and value is None:
-
                 try:
                     docname = data["name"]
                 except Exception:
@@ -69,9 +102,7 @@ def replace_module_in_json_in_customs(data, module_name, mapping_custom_to_modul
                     continue
 
                 data[key] = module_name
-                print(f"  ✔ Custom: Set module for '{docname}' → {module_name}")
                 mapping_custom_to_module[docname] = module_name
-
             else:
                 replace_module_in_json_in_customs(value, module_name, mapping_custom_to_module)
 
@@ -83,23 +114,27 @@ def replace_module_in_json_in_customs(data, module_name, mapping_custom_to_modul
 
 
 def fix_custom_json_modules(app: str, final_map: dict, mapping_custom_to_module: dict):
+    """
+    Update module values inside all custom JSON files in the app.
+
+    Iterates through each module’s `custom` folder and ensures that JSON
+    metadata has correct module names. Updates the mapping of custom
+    documents to module names for later use in fixture processing.
+
+    Args:
+        app: The Frappe app name.
+        final_map: The merged module map.
+        mapping_custom_to_module: A dictionary that will be populated
+            with docname → module name mappings.
+    """
     app_path = Path(frappe.get_app_path(app))
 
-    print("\n=== MODULE MAP (FINAL) ===")
-    for original, normalized in final_map.items():
-        print(f" {original}  →  {normalized}")
-    print("==========================\n")
-
     for original_module_name, normalized_name in final_map.items():
-
         module_folder = app_path / normalized_name / "custom"
-
         if not module_folder.exists():
             continue
 
         for json_file in module_folder.glob("*.json"):
-            print(f"→ Processing custom JSON: {json_file.name}")
-
             with open(json_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
@@ -112,22 +147,27 @@ def fix_custom_json_modules(app: str, final_map: dict, mapping_custom_to_module:
             with open(json_file, "w", encoding="utf-8") as f:
                 json.dump(updated_data, f, indent=4, ensure_ascii=False)
 
-            print(f"  ✔ Saved {json_file.name} with module={original_module_name}\n")
-
-    print("✔ All custom JSON files processed.\n")
-
-
-# ---------------------------------------------------------
-# FIX FIXTURES
-# ---------------------------------------------------------
 
 def replace_module_in_json_in_fixture(data, mapping_custom_to_module, app_name):
+    """
+    Recursively update fixture JSON data to have correct module names.
+
+    If a fixture item has `"module": null`, it is replaced by:
+        - the module name associated with the corresponding docname,
+          if known from custom JSON;
+        - otherwise a fallback module name for the entire app.
+
+    Args:
+        data: JSON structure loaded into Python objects.
+        mapping_custom_to_module: Mapping of docname → module.
+        app_name: Fallback module name.
+
+    Returns:
+        The updated JSON data.
+    """
     if isinstance(data, dict):
-
         for key, value in data.items():
-
             if key == "module" and value is None:
-
                 try:
                     docname = data["name"]
                 except Exception:
@@ -135,11 +175,8 @@ def replace_module_in_json_in_fixture(data, mapping_custom_to_module, app_name):
                     continue
 
                 if docname in mapping_custom_to_module:
-                    new_module = mapping_custom_to_module[docname]
-                    data[key] = new_module
-                    print(f"  ✔ Fixture: Set module for '{docname}' → {new_module}")
+                    data[key] = mapping_custom_to_module[docname]
                 else:
-                    print(f"  ⚠️  No mapping for '{docname}', using app name '{app_name}'")
                     data[key] = app_name
 
             else:
@@ -153,14 +190,38 @@ def replace_module_in_json_in_fixture(data, mapping_custom_to_module, app_name):
 
 
 def get_app_module_name(final_map: dict, app: str) -> str:
-    # Look for normalized == app
+    """
+    Determine the fallback module name for fixtures.
+
+    The fallback is the original module name whose normalized version
+    equals the application name. If none match, the app name is returned.
+
+    Args:
+        final_map: Mapping of original → normalized module names.
+        app: The Frappe app name.
+
+    Returns:
+        The best fallback module name.
+    """
     for original, normalized in final_map.items():
         if normalized == app:
             return original
-    return app  # fallback
+    return app
 
 
 def fix_fixture_modules(app: str, mapping_custom_to_module: dict, final_map: dict):
+    """
+    Update all JSON fixture files in the app to ensure correct module
+    assignments.
+
+    Loads each fixture JSON file, applies module corrections based on
+    custom document mappings, and writes the changes back to disk.
+
+    Args:
+        app: The Frappe app name.
+        mapping_custom_to_module: Mapping of docname → module name.
+        final_map: Final merged module map.
+    """
     app_path = Path(frappe.get_app_path(app))
     fixtures_path = app_path / "fixtures"
 
@@ -168,15 +229,9 @@ def fix_fixture_modules(app: str, mapping_custom_to_module: dict, final_map: dic
         print("⚠️  No fixtures directory found — skipping.")
         return
 
-    print("\n=== PROCESSING FIXTURES ===\n")
-
-    # Correct logic here
     app_name = get_app_module_name(final_map, app)
-    print(f"Using fixture fallback module name: {app_name}")
 
     for json_file in fixtures_path.glob("*.json"):
-        print(f"→ Processing fixture: {json_file.name}")
-
         with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
@@ -189,21 +244,21 @@ def fix_fixture_modules(app: str, mapping_custom_to_module: dict, final_map: dic
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump(updated_data, f, indent=4, ensure_ascii=False)
 
-        print(f"  ✔ Saved fixture {json_file.name}\n")
 
-    print("✔ All fixtures updated.\n")
+def run(app: str, custom_override_map: dict | None = None):
+    """
+    Entry point for bench execute.
 
-# ---------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------
+    Args:
+        app: The Frappe app name to process.
+        custom_override_map: Optional dict of user overrides where
+            keys are original module names and values are normalized names.
 
-if __name__ == "__main__":
-
-    custom_override_map = {
-        "Al-Jar HR tawfik": "al_jar_hr",
-    }
-
-    app = "fabrica_construction"
+    Example bench usage:
+        bench execute path.to.module.run --kwargs '{"app": "myapp", "custom_override_map": {"HR": "human_resources"}}'
+    """
+    if custom_override_map is None:
+        custom_override_map = {}
 
     mapping_custom_to_module = {}
 
@@ -211,10 +266,9 @@ if __name__ == "__main__":
     final_map = merge_maps(auto_map, custom_override_map)
 
     fix_custom_json_modules(app, final_map, mapping_custom_to_module)
-
-    print("\n=== CUSTOM → MODULE MAPPING (RESULT) ===")
-    for k, v in mapping_custom_to_module.items():
-        print(f" {k}  →  {v}")
-    print("========================================\n")
-
     fix_fixture_modules(app, mapping_custom_to_module, final_map)
+
+    return {
+        "final_map": final_map,
+        "custom_mappings": mapping_custom_to_module,
+    }
