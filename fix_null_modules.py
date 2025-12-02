@@ -272,3 +272,32 @@ def run(app: str, custom_override_map: dict | None = None):
         "final_map": final_map,
         "custom_mappings": mapping_custom_to_module,
     }
+
+
+""" 
+📂 Folder Structure
+
+Clone or place the script in:
+
+your_app/
+  your_app/
+    utils/
+      fix_null_modules.py
+2. Run the execute command
+
+Basic usage:
+
+bench --site <your-site> execute "your_app.utils.fix_null_modules.run" --kwargs '{"app": "your_app"}'
+
+
+Example for aljar_system:
+
+bench --site aljar.localhost execute "aljar_system.utils.fix_null_modules.run" --kwargs '{"app": "aljar_system"}'
+
+3. Optional: Add Custom Overrides
+
+If you want to override module names manually, pass a custom_override_map:
+
+bench --site aljar.localhost execute "aljar_system.utils.fix_null_modules.run" \
+  --kwargs '{"app": "aljar_system", "custom_override_map": {"HR": "human_resources"}}'
+"""
